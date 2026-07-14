@@ -227,7 +227,18 @@ func TestRangeVectorOperator_Buffering_NoFiltering_OverlappingRanges(t *testing.
 
 			require.Len(t, consumer1Data, expectedStepsPerSeries*expectedSeries)
 			require.Len(t, consumer2Data, expectedStepsPerSeries*expectedSeries)
-			require.Equal(t, consumer1Data, consumer2Data)
+
+			for i := range consumer1Data {
+				require.Equal(t, consumer1Data[i].stepData, consumer2Data[i].stepData)
+			}
+
+			for i := range consumer1Data {
+				consumer1Data[i].Close()
+			}
+
+			for i := range consumer2Data {
+				consumer2Data[i].Close()
+			}
 
 			require.NoError(t, consumer1.FinishedReading(ctx))
 			require.NoError(t, consumer2.FinishedReading(ctx))
@@ -248,10 +259,30 @@ func TestRangeVectorOperator_Buffering_NoFiltering_OverlappingRanges(t *testing.
 	}
 }
 
-func testReadConsumerToEnd(t *testing.T, numSeries int, consumer *RangeVectorDuplicationConsumer) []*types.RangeVectorStepData {
+type ownedStepData struct {
+	stepData        *types.RangeVectorStepData
+	floatBuffer     *types.FPointRingBuffer
+	histogramBuffer *types.HPointRingBuffer
+}
+
+func (d ownedStepData) Close() {
+	if d.floatBuffer != nil {
+		d.floatBuffer.Close()
+	}
+
+	if d.histogramBuffer != nil {
+		d.histogramBuffer.Close()
+	}
+}
+
+func testReadConsumerToEnd(t *testing.T, numSeries int, consumer *RangeVectorDuplicationConsumer) []ownedStepData {
 	t.Helper()
 
-	var out []*types.RangeVectorStepData
+	var (
+		out          []ownedStepData
+		floatBuf     *types.FPointRingBuffer
+		histogramBuf *types.HPointRingBuffer
+	)
 	for range numSeries {
 		err := consumer.NextSeries(context.Background())
 		if errors.Is(err, types.EOS) {
@@ -267,7 +298,19 @@ func testReadConsumerToEnd(t *testing.T, numSeries int, consumer *RangeVectorDup
 			}
 
 			require.NoError(t, err)
-			out = append(out, d)
+
+			// Clone floats and histograms returned since the views will be invalidated
+			// on the next call to NextSeries or NextStepSamples otherwise.
+			d.Floats, floatBuf, err = d.Floats.Clone()
+			require.NoError(t, err)
+			d.Histograms, histogramBuf, err = d.Histograms.Clone()
+			require.NoError(t, err)
+
+			out = append(out, ownedStepData{
+				stepData:        d,
+				floatBuffer:     floatBuf,
+				histogramBuffer: histogramBuf,
+			})
 		}
 	}
 	return out
